@@ -488,36 +488,7 @@ def parse_opt(known=False):
 
     return parser.parse_known_args()[0] if known else parser.parse_args()
 
-def main(opt, callbacks=Callbacks()):
-    # Display arguments
-    if RANK in {-1, 0}:
-        print_args(vars(opt))
 
-    # Resume training or setup new training
-    if opt.resume and not check_comet_resume(opt) and not opt.evolve:
-        last = Path(check_file(opt.resume) if isinstance(opt.resume, str) else get_latest_run())
-        opt_yaml = last.parent.parent / 'opt.yaml'  # Path to training options YAML
-        opt_data = opt.data  # Original dataset
-        if opt_yaml.is_file():
-            with open(opt_yaml, errors='ignore') as f:
-                d = yaml.safe_load(f)
-        else:
-            d = torch.load(last, map_location='cpu')['opt']
-        opt = argparse.Namespace(**d)  # Replace options
-        opt.cfg, opt.weights, opt.resume = '', str(last), True  # Reinstate options
-        if is_url(opt_data):
-            opt.data = check_file(opt_data)  # Avoid HUB resume auth timeout
-    else:
-        opt.data, opt.cfg, opt.hyp, opt.weights, opt.project = \
-            check_file(opt.data), check_yaml(opt.cfg), check_yaml(opt.hyp), str(opt.weights), str(opt.project)  # File checks
-        assert len(opt.cfg) or len(opt.weights), 'Either --cfg or --weights must be specified'
-        if opt.evolve:
-            if opt.project == str(ROOT / 'runs/train'):  # Rename default project if evolving
-                opt.project = str(ROOT / 'runs/evolve')
-            opt.exist_ok, opt.resume = opt.resume, False  # Set exist_ok and disable resume
-        if opt.name == 'cfg':
-            opt.name = Path(opt.cfg).stem  # Use model.yaml as name
-        opt.save_dir = str(increment_path(Path(opt.project) / opt.name, exist_ok=opt.exist_ok))  # Save directory
 def main(opt, callbacks=Callbacks()):
     # Checks
     if RANK in {-1, 0}:
