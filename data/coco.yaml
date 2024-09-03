@@ -1,0 +1,17 @@
+# Dataset root directory
+path: ../datasets/custom_dataset  # Update this path to your dataset root
+
+# Paths to the train and validation image lists
+train: train.txt  # Path to file containing training image paths (relative to 'path')
+val: val.txt      # Path to file containing validation image paths (relative to 'path')
+
+# Number of classes
+nc: 5
+
+# Class names
+names:
+  0: red buoy
+  1: white buoy
+  2: dock
+  3: wamv
+  4: black buoy
