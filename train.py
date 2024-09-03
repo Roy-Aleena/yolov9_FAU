@@ -310,101 +310,101 @@ def train(hyp, opt, device, callbacks):  # hyp is path/to/hyp.yaml or hyp dictio
         # Save model checkpoints, evaluate performance, etc.
 
 
-# Forward pass
-with torch.amp.autocast(device_type='cuda', dtype=torch.float16):  # Use mixed precision
-    pred = model(imgs)  # Forward pass
-    loss, loss_items = compute_loss(pred, targets.to(device))  # Compute loss
-    if RANK != -1:
-        loss *= WORLD_SIZE  # Scale loss for DDP
-    if opt.quad:
-        loss *= 4.  # Apply quadratic scaling
+        # Forward pass
+        with torch.amp.autocast(device_type='cuda', dtype=torch.float16):  # Use mixed precision
+            pred = model(imgs)  # Forward pass
+            loss, loss_items = compute_loss(pred, targets.to(device))  # Compute loss
+            if RANK != -1:
+                loss *= WORLD_SIZE  # Scale loss for DDP
+            if opt.quad:
+                loss *= 4.  # Apply quadratic scaling
 
-# Backward pass
-scaler.scale(loss).backward()  # Scale loss and backpropagate
+        # Backward pass
+        scaler.scale(loss).backward()  # Scale loss and backpropagate
 
-# Optimize
-if ni - last_opt_step >= accumulate:
-    scaler.unscale_(optimizer)  # Unscale gradients
-    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)  # Clip gradients
-    scaler.step(optimizer)  # Update model parameters
-    scaler.update()  # Update scaler
-    optimizer.zero_grad()  # Reset gradients
-    if ema:
-        ema.update(model)  # Update EMA
-    last_opt_step = ni
+        # Optimize
+        if ni - last_opt_step >= accumulate:
+            scaler.unscale_(optimizer)  # Unscale gradients
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)  # Clip gradients
+            scaler.step(optimizer)  # Update model parameters
+            scaler.update()  # Update scaler
+            optimizer.zero_grad()  # Reset gradients
+            if ema:
+                ema.update(model)  # Update EMA
+            last_opt_step = ni
 
-# Logging
-if RANK in {-1, 0}:
-    mloss = (mloss * i + loss_items) / (i + 1)  # Update mean losses
-    mem = f'{torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0:.3g}G'  # Memory usage
-    pbar.set_description(('%11s' * 2 + '%11.4g' * 5) %
-                         (f'{epoch}/{epochs - 1}', mem, *mloss, targets.shape[0], imgs.shape[-1]))
-    callbacks.run('on_train_batch_end', model, ni, imgs, targets, paths, list(mloss))
-    if callbacks.stop_training:
-        return
+        # Logging
+        if RANK in {-1, 0}:
+            mloss = (mloss * i + loss_items) / (i + 1)  # Update mean losses
+            mem = f'{torch.cuda.memory_reserved() / 1E9 if torch.cuda.is_available() else 0:.3g}G'  # Memory usage
+            pbar.set_description(('%11s' * 2 + '%11.4g' * 5) %
+                                 (f'{epoch}/{epochs - 1}', mem, *mloss, targets.shape[0], imgs.shape[-1]))
+            callbacks.run('on_train_batch_end', model, ni, imgs, targets, paths, list(mloss))
+            if callbacks.stop_training:
+                return
 
-# Scheduler step
-lr = [x['lr'] for x in optimizer.param_groups]  # Log learning rates
-scheduler.step()
+        # Scheduler step
+        lr = [x['lr'] for x in optimizer.param_groups]  # Log learning rates
+        scheduler.step()
+        
+        # End of epoch
+        if RANK in {-1, 0}:
+            # Validate and update model
+            callbacks.run('on_train_epoch_end', epoch=epoch)
+            ema.update_attr(model, include=['yaml', 'nc', 'hyp', 'names', 'stride', 'class_weights'])
+            final_epoch = (epoch + 1 == epochs) or stopper.possible_stop
+            if not noval or final_epoch:
+                results, maps, _ = validate.run(
+                    data_dict,
+                    batch_size=batch_size // WORLD_SIZE * 2,
+                    imgsz=imgsz,
+                    half=amp,
+                    model=ema.ema,
+                    single_cls=single_cls,
+                    dataloader=val_loader,
+                    save_dir=save_dir,
+                    plots=False,
+                    callbacks=callbacks,
+                    compute_loss=compute_loss
+                )
+        
+            # Early stopping
+            fi = fitness(np.array(results).reshape(1, -1))  # Calculate fitness
+            stop = stopper(epoch=epoch, fitness=fi)  # Check for early stopping
+            if fi > best_fitness:
+                best_fitness = fi
+            log_vals = list(mloss) + list(results) + lr
+            callbacks.run('on_fit_epoch_end', log_vals, epoch, best_fitness, fi)
+        
+            # Save model checkpoints
+            if (not nosave) or (final_epoch and not evolve):
+                ckpt = {
+                    'epoch': epoch,
+                    'best_fitness': best_fitness,
+                    'model': deepcopy(de_parallel(model)).half(),
+                    'ema': deepcopy(ema.ema).half(),
+                    'updates': ema.updates,
+                    'optimizer': optimizer.state_dict(),
+                    'opt': vars(opt),
+                    'git': GIT_INFO,  # Git information
+                    'date': datetime.now().isoformat()
+                }
+                torch.save(ckpt, last)  # Save last checkpoint
+                if best_fitness == fi:
+                    torch.save(ckpt, best)  # Save best checkpoint
+                if opt.save_period > 0 and epoch % opt.save_period == 0:
+                    torch.save(ckpt, w / f'epoch{epoch}.pt')  # Save periodic checkpoints
+                del ckpt
+                callbacks.run('on_model_save', last, epoch, final_epoch, best_fitness, fi)
 
-# End of epoch
-if RANK in {-1, 0}:
-    # Validate and update model
-    callbacks.run('on_train_epoch_end', epoch=epoch)
-    ema.update_attr(model, include=['yaml', 'nc', 'hyp', 'names', 'stride', 'class_weights'])
-    final_epoch = (epoch + 1 == epochs) or stopper.possible_stop
-    if not noval or final_epoch:
-        results, maps, _ = validate.run(
-            data_dict,
-            batch_size=batch_size // WORLD_SIZE * 2,
-            imgsz=imgsz,
-            half=amp,
-            model=ema.ema,
-            single_cls=single_cls,
-            dataloader=val_loader,
-            save_dir=save_dir,
-            plots=False,
-            callbacks=callbacks,
-            compute_loss=compute_loss
-        )
-
-    # Early stopping
-    fi = fitness(np.array(results).reshape(1, -1))  # Calculate fitness
-    stop = stopper(epoch=epoch, fitness=fi)  # Check for early stopping
-    if fi > best_fitness:
-        best_fitness = fi
-    log_vals = list(mloss) + list(results) + lr
-    callbacks.run('on_fit_epoch_end', log_vals, epoch, best_fitness, fi)
-
-    # Save model checkpoints
-    if (not nosave) or (final_epoch and not evolve):
-        ckpt = {
-            'epoch': epoch,
-            'best_fitness': best_fitness,
-            'model': deepcopy(de_parallel(model)).half(),
-            'ema': deepcopy(ema.ema).half(),
-            'updates': ema.updates,
-            'optimizer': optimizer.state_dict(),
-            'opt': vars(opt),
-            'git': GIT_INFO,  # Git information
-            'date': datetime.now().isoformat()
-        }
-        torch.save(ckpt, last)  # Save last checkpoint
-        if best_fitness == fi:
-            torch.save(ckpt, best)  # Save best checkpoint
-        if opt.save_period > 0 and epoch % opt.save_period == 0:
-            torch.save(ckpt, w / f'epoch{epoch}.pt')  # Save periodic checkpoints
-        del ckpt
-        callbacks.run('on_model_save', last, epoch, final_epoch, best_fitness, fi)
-
-# DDP EarlyStopping
-if RANK != -1:
-    broadcast_list = [stop if RANK == 0 else None]
-    dist.broadcast_object_list(broadcast_list, 0)  # Broadcast 'stop' to all ranks
-    if RANK != 0:
-        stop = broadcast_list[0]
-if stop:
-    break  # Break all DDP ranks if stopping
+        # DDP EarlyStopping
+        if RANK != -1:
+            broadcast_list = [stop if RANK == 0 else None]
+            dist.broadcast_object_list(broadcast_list, 0)  # Broadcast 'stop' to all ranks
+            if RANK != 0:
+                stop = broadcast_list[0]
+        if stop:
+            break  # Break all DDP ranks if stopping
 
 # End of training loop
 def end_training(log_results=True):
