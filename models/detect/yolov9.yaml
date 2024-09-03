@@ -7,8 +7,10 @@ width_multiple: 1.0  # layer channel multiple
 #activation: nn.LeakyReLU(0.1)
 activation: nn.ReLU()
 
-# anchors
+# anchors (ensure these are appropriate for your dataset)
 anchors: 3
+# Example anchors; replace with your dataset-specific values if available
+# anchors: [10,13, 16,30, 33,23]  
 
 # YOLOv9 backbone
 backbone:
@@ -115,4 +117,3 @@ head:
    # detect
    [[31, 34, 37, 16, 19, 22], 1, DualDDetect, [5]],  # DualDDetect(A3, A4, A5, P3, P4, P5) (updated nc to 5)
   ]
-
